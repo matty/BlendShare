@@ -1,9 +1,12 @@
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Triturbo.BlendShapeShare.Tests.Editor")]
+
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
 using UnityEditor;
 using System.Linq;
+using Unity.Collections;
 
 using Triturbo.BlendShapeShare.BlendShapeData;
 using System.Diagnostics;
@@ -136,7 +139,7 @@ namespace Triturbo.BlendShapeShare.Extractor
             List<MeshData> finalList = new List<MeshData>();
             foreach (var meshData in meshDataList)
             {
-                if (meshData.BlendShapes.Count > 0)
+                if (meshData.BlendShapes.Count > 0 || meshData.HasSkinningData || meshData.HasVertexColors)
                 {
                     finalList.Add(meshData);
                 }
@@ -329,12 +332,6 @@ namespace Triturbo.BlendShapeShare.Extractor
                         }
                         meshData.SetBlendShape(name, GetFbxBlendShapeData(channel, sourceMesh, weldingGroups, relativeTransform, baseMesh));
                     }
-                }
-
-                // Extract Skinning Data via FBX SDK
-                if (blendShapesExtractorOptions.includeWeights && !meshData.HasSkinningData && sourceMesh.GetDeformerCount(FbxDeformer.EDeformerType.eSkin) > 0)
-                {
-                    meshData.ExtractFbxSkin(sourceMesh, weldingGroups, relativeTransform, baseMesh);
                 }
 
                 relativeTransform.Dispose();
@@ -663,98 +660,6 @@ namespace Triturbo.BlendShapeShare.Extractor
         }
 
 
-        internal static void ExtractFbxSkin(this MeshData meshData, FbxMesh sourceMesh, List<List<int>> weldingGroups, FbxAMatrix transformMatrix, FbxMesh baseMesh = null)
-        {
-            int controlPointCount = sourceMesh.GetControlPointsCount();
-            var skin = (FbxSkin)sourceMesh.GetDeformer(0, FbxDeformer.EDeformerType.eSkin);
-            if (skin == null) return;
-
-            // In com.autodesk.fbx 4.2.1, FbxSkin might not expose GetClusterCount directly.
-            // We use GetSrcObjectCount with manual iteration to find clusters.
-            int clusterCount = 0;
-            for (int i = 0; i < skin.GetSrcObjectCount(); i++)
-            {
-                if (skin.GetSrcObject(i) is FbxCluster) clusterCount++;
-            }
-
-            meshData.m_BoneNames = new string[clusterCount];
-            meshData.m_BindPoses = new Matrix4x4[clusterCount];
-            
-            var boneWeights = new BoneWeight[controlPointCount];
-            var weightCounts = new int[controlPointCount];
-
-            int validClusterIndex = 0;
-            for (int i = 0; i < skin.GetSrcObjectCount(); i++)
-            {
-                FbxObject srcObj = skin.GetSrcObject(i);
-                FbxCluster cluster = srcObj as FbxCluster;
-                if (cluster == null) continue;
-
-                meshData.m_BoneNames[validClusterIndex] = cluster.GetLink() != null ? cluster.GetLink().GetName() : "Unknown Bone";
-
-                // Bind Pose
-                FbxAMatrix linkMatrix = new FbxAMatrix();
-                cluster.GetTransformLinkMatrix(linkMatrix);
-                meshData.m_BindPoses[validClusterIndex] = linkMatrix.Inverse().ToUnityMatrix();
-
-                // Weights
-                int clusterIndexCount = cluster.GetControlPointIndicesCount();
-                
-                for (int j = 0; j < clusterIndexCount; j++)
-                {
-                    // Use index-based accessors which are more stable in Unity's wrapper
-                    int vertexIndex = cluster.GetControlPointIndexAt(j);
-                    float weightValue = (float)cluster.GetControlPointWeightAt(j);
-
-                    if (vertexIndex < 0 || vertexIndex >= controlPointCount) continue;
-
-                    var bw = boneWeights[vertexIndex];
-                    int count = weightCounts[vertexIndex]++;
-
-                    switch (count)
-                    {
-                        case 0: bw.boneIndex0 = validClusterIndex; bw.weight0 = weightValue; break;
-                        case 1: bw.boneIndex1 = validClusterIndex; bw.weight1 = weightValue; break;
-                        case 2: bw.boneIndex2 = validClusterIndex; bw.weight2 = weightValue; break;
-                        case 3: bw.boneIndex3 = validClusterIndex; bw.weight3 = weightValue; break;
-                    }
-                    boneWeights[vertexIndex] = bw;
-                }
-                validClusterIndex++;
-            }
-            
-            // Normalize weights
-            for (int i = 0; i < controlPointCount; i++)
-            {
-                var bw = boneWeights[i];
-                float total = bw.weight0 + bw.weight1 + bw.weight2 + bw.weight3;
-                if (total > 0)
-                {
-                    bw.weight0 /= total;
-                    bw.weight1 /= total;
-                    bw.weight2 /= total;
-                    bw.weight3 /= total;
-                }
-                boneWeights[i] = bw;
-            }
-
-            meshData.m_BoneWeights = boneWeights;
-        }
-
-        // Helper to convert FBX matrix to Unity matrix
-        private static Matrix4x4 ToUnityMatrix(this FbxAMatrix fbxMat)
-        {
-            Matrix4x4 unityMat = new Matrix4x4();
-            for (int r = 0; r < 4; r++)
-            {
-                for (int c = 0; c < 4; c++)
-                {
-                    unityMat[r, c] = (float)fbxMat.Get(r, c);
-                }
-            }
-            return unityMat;
-        }
-
 #endif
 
         #endregion
@@ -892,7 +797,9 @@ namespace Triturbo.BlendShapeShare.Extractor
                 // Extract bone names from SkinnedMeshRenderer
                 if (options.includeWeights && meshRenderer != null && meshRenderer.bones != null)
                 {
-                    meshData.m_BoneNames = meshRenderer.bones.Select(b => b.name).ToArray();
+                    meshData.m_BoneNames = meshRenderer.bones
+                        .Select(b => b != null ? b.name : string.Empty)
+                        .ToArray();
                 }
             }
 
@@ -917,7 +824,7 @@ namespace Triturbo.BlendShapeShare.Extractor
         }
 
 
-        private static void ExtractUnityBlendShapes(this MeshData meshData, Mesh sourceMesh, Mesh baseMesh, BlendShapesExtractorOptions options)
+        internal static void ExtractUnityBlendShapes(this MeshData meshData, Mesh sourceMesh, Mesh baseMesh, BlendShapesExtractorOptions options)
         {
             bool calculateDiffs = baseMesh != null && baseMesh != sourceMesh && baseMesh.vertexCount == sourceMesh.vertexCount;
             
@@ -985,20 +892,42 @@ namespace Triturbo.BlendShapeShare.Extractor
                 meshData.SetBlendShape(shapeName, unityBlendShapeData);
             }
 
-            // Extract skinning data if not already present
+            // Extract skinning data from Unity mesh (lossless — supports >4 bones per vertex)
             if (options.includeWeights && !meshData.HasSkinningData && sourceMesh.bindposes != null && sourceMesh.bindposes.Length > 0)
             {
-                meshData.m_BoneWeights = sourceMesh.boneWeights;
-                meshData.m_BindPoses = sourceMesh.bindposes;
-                
-                // Try to get bone names if possible (requires finding the SMR)
-                // This is a bit tricky from just the Mesh, but the caller often has the GameObject
+                NativeArray<byte> bonesPerVertex = sourceMesh.GetBonesPerVertex();
+                NativeArray<BoneWeight1> allBoneWeights = sourceMesh.GetAllBoneWeights();
+
+                if (bonesPerVertex.Length > 0 && allBoneWeights.Length > 0)
+                {
+                    meshData.m_BonesPerVertex = bonesPerVertex.ToArray();
+                    meshData.m_BoneWeightBoneIndices = new int[allBoneWeights.Length];
+                    meshData.m_BoneWeightValues = new float[allBoneWeights.Length];
+                    for (int w = 0; w < allBoneWeights.Length; w++)
+                    {
+                        meshData.m_BoneWeightBoneIndices[w] = allBoneWeights[w].boneIndex;
+                        meshData.m_BoneWeightValues[w] = allBoneWeights[w].weight;
+                    }
+                    meshData.m_BindPoses = sourceMesh.bindposes;
+                }
             }
 
-            // Extract vertex colors
-            if (options.includeColors && sourceMesh.colors != null && sourceMesh.colors.Length > 0)
+            // Extract vertex colors (check both Color and Color32 buffers)
+            if (options.includeColors)
             {
-                meshData.m_Colors = sourceMesh.colors;
+                Color[] colors = sourceMesh.colors;
+                if (colors != null && colors.Length > 0)
+                {
+                    meshData.m_Colors = colors;
+                }
+                else
+                {
+                    Color32[] colors32 = sourceMesh.colors32;
+                    if (colors32 != null && colors32.Length > 0)
+                    {
+                        meshData.m_Colors = colors32.Select(c => (Color)c).ToArray();
+                    }
+                }
             }
         }
 

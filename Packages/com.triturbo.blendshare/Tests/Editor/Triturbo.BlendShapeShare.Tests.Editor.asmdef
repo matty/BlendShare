@@ -1,0 +1,26 @@
+{
+    "name": "Triturbo.BlendShapeShare.Tests.Editor",
+    "rootNamespace": "",
+    "references": [
+        "GUID:36c306fbfd17b8a4a8443f67f3991996",
+        "GUID:37e6e828fcded31439d9f905b4e0bdea",
+        "GUID:310e50e946a3d3f47a2b344b62f35a08",
+        "UnityEngine.TestRunner",
+        "UnityEditor.TestRunner"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "nunit.framework.dll"
+    ],
+    "autoReferenced": false,
+    "defineConstraints": [
+        "UNITY_INCLUDE_TESTS"
+    ],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

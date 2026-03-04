@@ -75,12 +75,17 @@ namespace Triturbo.BlendShapeShare.BlendShapeData
         public string m_MeshName;
         public List<string> m_ShapeNames;
 
-        public BoneWeight[] m_BoneWeights;
+        // Lossless bone weight storage using primitive arrays (supports >4 bones per vertex)
+        // These map to Mesh.GetAllBoneWeights/SetBoneWeights API
+        public byte[] m_BonesPerVertex;
+        public int[] m_BoneWeightBoneIndices;
+        public float[] m_BoneWeightValues;
+
         public Matrix4x4[] m_BindPoses;
         public string[] m_BoneNames;
         public Color[] m_Colors;
 
-        public bool HasSkinningData => m_BoneWeights != null && m_BoneWeights.Length > 0;
+        public bool HasSkinningData => m_BonesPerVertex != null && m_BonesPerVertex.Length > 0;
         public bool HasVertexColors => m_Colors != null && m_Colors.Length > 0;
 
         [SerializeField]
@@ -249,9 +254,23 @@ namespace Triturbo.BlendShapeShare.BlendShapeData
                 {
                     if (entry.m_ShapeNames != null)
                         baseData.m_ShapeNames.AddRange(entry.m_ShapeNames);
-    
+
                     if (entry.BlendShapes != null)
                         baseData.BlendShapes.AddRange(entry.BlendShapes);
+
+                    // Carry over skinning and color data from the first entry that has it
+                    if (!baseData.HasSkinningData && entry.HasSkinningData)
+                    {
+                        baseData.m_BonesPerVertex = entry.m_BonesPerVertex;
+                        baseData.m_BoneWeightBoneIndices = entry.m_BoneWeightBoneIndices;
+                        baseData.m_BoneWeightValues = entry.m_BoneWeightValues;
+                        baseData.m_BindPoses = entry.m_BindPoses;
+                        baseData.m_BoneNames = entry.m_BoneNames;
+                    }
+                    if (!baseData.HasVertexColors && entry.HasVertexColors)
+                    {
+                        baseData.m_Colors = entry.m_Colors;
+                    }
                 }
     
                 // Optional: remove duplicate shape names

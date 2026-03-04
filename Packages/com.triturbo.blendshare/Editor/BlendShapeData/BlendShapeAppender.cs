@@ -1,9 +1,12 @@
+[assembly: System.Runtime.CompilerServices.InternalsVisibleTo("Triturbo.BlendShapeShare.Tests.Editor")]
+
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
 using System.Linq;
+using Unity.Collections;
 
 using UnityEditor;
 using Object = UnityEngine.Object;
@@ -47,15 +50,34 @@ namespace Triturbo.BlendShapeShare.BlendShapeData
                 // If invalid, rebuild the FBX immediately
                 string folder = System.IO.Path.GetDirectoryName(path) ?? Application.dataPath;
                 string tempAssetPath = System.IO.Path.Combine(folder, $"{targetMeshContainer.name}-{System.Guid.NewGuid().ToString()}.fbx");
-                
+
                 if (!CreateFbx(targetFbx, appliedBlendShapes, tempAssetPath, true))
                 {
                     Debug.LogError("Failed to create blendshapes fbx.");
                     return null;
                 }
-                var result = GeneratedMeshAssetSO.SaveMeshesToAsset(targetFbx, appliedBlendShapes, tempAssetPath, path); 
+
+                // Load meshes from temp FBX and apply stored weights/colors
+                var tempMeshes = MeshUtil.GetMeshes(AssetDatabase.LoadAssetAtPath<GameObject>(tempAssetPath));
+                List<Mesh> processedMeshes = new();
+                foreach (BlendShapeDataSO data in blendShapes)
+                {
+                    foreach (var meshData in data.m_MeshDataList)
+                    {
+                        if (tempMeshes.TryGetValue(meshData.m_MeshName, out Mesh fbxMesh))
+                        {
+                            Mesh meshCopy = Object.Instantiate(fbxMesh);
+                            meshCopy.name = meshData.m_MeshName;
+                            ApplySkinningAndColors(meshData, meshCopy);
+                            processedMeshes.Add(meshCopy);
+                        }
+                    }
+                }
+
                 AssetDatabase.MoveAssetToTrash(tempAssetPath);
-                return result;
+
+                if (processedMeshes.Count == 0) return null;
+                return GeneratedMeshAssetSO.SaveMeshesToAsset(targetFbx, appliedBlendShapes, processedMeshes, path);
             }
             
             foreach (BlendShapeDataSO data in blendShapes)
@@ -106,7 +128,7 @@ namespace Triturbo.BlendShapeShare.BlendShapeData
         
         
         #region Private Methods
-        private static Mesh CreateBlendShapesMesh(MeshData meshBlendShapesData, Mesh target)
+        internal static Mesh CreateBlendShapesMesh(MeshData meshBlendShapesData, Mesh target)
         {
             if (!meshBlendShapesData.IsValidTarget(target)) return null;
 
@@ -169,31 +191,56 @@ namespace Triturbo.BlendShapeShare.BlendShapeData
                 }
             }
 
-            // Apply skinning data if available
-            if (meshBlendShapesData.HasSkinningData)
+            ApplySkinningAndColors(meshBlendShapesData, newMesh);
+
+            return newMesh;
+        }
+        /// <summary>
+        /// Applies stored skinning data and vertex colors from MeshData to a Unity Mesh.
+        /// Uses the lossless BoneWeight1 API (supports >4 bones per vertex).
+        /// </summary>
+        internal static void ApplySkinningAndColors(MeshData meshData, Mesh mesh)
+        {
+            if (meshData.HasSkinningData)
             {
-                if (newMesh.vertexCount == meshBlendShapesData.m_BoneWeights.Length)
+                if (mesh.vertexCount == meshData.m_BonesPerVertex.Length)
                 {
-                    newMesh.boneWeights = meshBlendShapesData.m_BoneWeights;
-                    newMesh.bindposes = meshBlendShapesData.m_BindPoses;
+                    var bonesPerVertex = new NativeArray<byte>(meshData.m_BonesPerVertex, Allocator.Temp);
+                    var allBoneWeights = new NativeArray<BoneWeight1>(meshData.m_BoneWeightBoneIndices.Length, Allocator.Temp);
+                    for (int w = 0; w < allBoneWeights.Length; w++)
+                    {
+                        allBoneWeights[w] = new BoneWeight1
+                        {
+                            boneIndex = meshData.m_BoneWeightBoneIndices[w],
+                            weight = meshData.m_BoneWeightValues[w]
+                        };
+                    }
+
+                    mesh.SetBoneWeights(bonesPerVertex, allBoneWeights);
+                    mesh.bindposes = meshData.m_BindPoses;
+
+                    bonesPerVertex.Dispose();
+                    allBoneWeights.Dispose();
                 }
                 else
                 {
-                    Debug.LogWarning($"[BlendShare] Skipping weight application for {meshBlendShapesData.m_MeshName} due to vertex count mismatch.");
+                    Debug.LogWarning($"[BlendShare] Skipping weight application for {meshData.m_MeshName}: vertex count mismatch ({mesh.vertexCount} vs {meshData.m_BonesPerVertex.Length}).");
                 }
             }
 
-            // Apply vertex colors if available
-            if (meshBlendShapesData.HasVertexColors)
+            if (meshData.HasVertexColors)
             {
-                if (newMesh.vertexCount == meshBlendShapesData.m_Colors.Length)
+                if (mesh.vertexCount == meshData.m_Colors.Length)
                 {
-                    newMesh.colors = meshBlendShapesData.m_Colors;
+                    mesh.colors = meshData.m_Colors;
+                }
+                else
+                {
+                    Debug.LogWarning($"[BlendShare] Skipping vertex color application for {meshData.m_MeshName}: vertex count mismatch ({mesh.vertexCount} vs {meshData.m_Colors.Length}).");
                 }
             }
-            
-            return newMesh;
         }
+
         public static bool IsAllMeshesValid(IEnumerable<BlendShapeDataSO> blendShapes, IEnumerable<Mesh> meshes)
         {
             List<Mesh> meshList = meshes.ToList();
